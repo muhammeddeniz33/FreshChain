@@ -51,6 +51,7 @@
     <div class="wallet-box">
         <p id="walletAddress">Wallet not Connected.</p>
         <button onclick="connectWallet()">🦊 Connect MetaMask </button>
+		<button class="secondary" onclick="enableGuestMode()">👤 Guest Mode (Read-Only)</button>
     </div>
 
     <div class="role-selector">
@@ -60,6 +61,7 @@
             <option value="adminPanel">Admin</option>
             <option value="farmerPanel">Producer (Farmer)</option>
             <option value="transporterPanel">Transporter</option>
+			<option value="distributorPanel">Distributor</option>
             <option value="retailerPanel">Retailer</option>
             <option value="customerPanel">Customer</option>
         </select>
@@ -69,6 +71,20 @@
 
     <div id="adminPanel" class="panel">
         <h2>👮 Admin Management</h2>
+		<div id="adminLoginBox" style="background:#f8d7da;border:1px solid #f5c6cb;padding:12px;border-radius:8px;margin-bottom:15px;">
+    <b>Admin Login (for instructor)</b>
+    <p style="margin:6px 0 10px 0; font-size: 13px; color:#721c24;">
+        This panel is protected with a fixed password for evaluation. Credentials are auto-filled.
+    </p>
+
+    <div class="form-group">
+        <label>Admin Password:</label>
+        <input type="password" id="adminPassword" value="bc123" placeholder="bc123">
+    </div>
+
+    <button onclick="adminLogin()">✅ Login as Admin</button>
+</div>
+
         <div class="form-group">
             <label> Enter Wallet Adress (0x...):</label>
             <input type="text" id="actorAddress" placeholder="0x123...">
@@ -129,7 +145,42 @@
             <input type="text" id="sensorLocation">
         </div>
         <button onclick="addSensorData()">Add Sensor Data</button>
+
+		<hr>
+<h3>Transfer Process</h3>
+<p>After recording sensor data, transfer the batch to Distributor:</p>
+
+<div class="form-group">
+  <label>Batch ID to be transferred:</label>
+  <input type="number" id="transporterTransferBatchId">
+</div>
+
+<div class="form-group">
+  <label>Distributor Address (0x...):</label>
+  <input type="text" id="transporterTransferNewOwner" placeholder="0x123...">
+</div>
+
+<button class="secondary" onclick="transferOwnershipFromTransporter()">Transfer to Distributor</button>
+
     </div>
+
+	<div id="distributorPanel" class="panel">
+  <h2>🏬 Distributor: Ownership Transfer</h2>
+  <p>Distributor, batch kendisindeyken ürünü Retailer'a transfer eder.</p>
+
+  <div class="form-group">
+    <label>Batch ID:</label>
+    <input type="number" id="distributorTransferBatchId">
+  </div>
+
+  <div class="form-group">
+    <label>Retailer Address (0x...):</label>
+    <input type="text" id="distributorTransferNewOwner" placeholder="0x123...">
+  </div>
+
+  <button class="secondary" onclick="transferOwnershipFromDistributor()">Transfer to Retailer</button>
+</div>
+
 
     <div id="retailerPanel" class="panel">
         <h2>🏪 Retailer: Product Acceptance</h2>
@@ -662,173 +713,329 @@
 
     let provider, signer, contract;
 
-    async function connectWallet() {
-        if (typeof window.ethereum !== 'undefined') {
-            try {
-                await window.ethereum.request({ method: 'eth_requestAccounts' });
-                provider = new ethers.providers.Web3Provider(window.ethereum);
-                signer = provider.getSigner();
-                const address = await signer.getAddress();
-                document.getElementById("walletAddress").innerText = "✅ Connected: " + address;
-                document.getElementById("walletAddress").style.color = "green";
-                contract = new ethers.Contract(contractAddress, contractABI, signer);
-                showStatus("Cüzdan bağlandı ve kontrat hazır!", "success");
-            } catch (error) {
-                console.error(error);
-                showStatus("Bağlantı hatası: " + error.message, "error");
-            }
-        } else {
-            alert("Lütfen tarayıcınıza MetaMask yükleyin!");
-        }
+let isGuestMode = false;
+let adminUnlocked = false;
+const sepoliaRpcUrl = "https://eth-sepolia.g.alchemy.com/v2/7wZVQuGXZ_Uo833XR3fmR";
+
+function getBatchIdFromUrl() {
+    const params = new URLSearchParams(window.location.search);
+    return params.get("batchId");
+}
+
+async function handleQrScanRedirect() {
+    const batchId = getBatchIdFromUrl();
+    if (!batchId) return false;
+
+    // Müşteri panelini aç
+    document.getElementById("roleSelect").value = "customerPanel";
+    switchPanel();
+
+    // batchId input alanına yaz
+    document.getElementById("queryBatchId").value = batchId;
+
+    // Guest mode aç
+    await enableGuestMode();
+
+    // Veri çek
+    await getBatchHistory();
+
+    return true;
+}
+
+
+// -------------------- WALLET --------------------
+async function connectWallet() {
+    if (typeof window.ethereum === 'undefined') {
+        alert("Lütfen tarayıcınıza MetaMask yükleyin!");
+        return;
     }
 
-    function switchPanel() {
-        document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-        const selected = document.getElementById("roleSelect").value;
-        if(selected !== "none") {
-            document.getElementById(selected).classList.add('active');
-        }
+    try {
+        await window.ethereum.request({ method: 'eth_requestAccounts' });
+        provider = new ethers.providers.Web3Provider(window.ethereum);
+        signer = provider.getSigner();
+
+        const address = await signer.getAddress();
+        document.getElementById("walletAddress").innerText = "✅ Connected: " + address;
+        document.getElementById("walletAddress").style.color = "green";
+
+        contract = new ethers.Contract(contractAddress, contractABI, signer);
+
+        isGuestMode = false; // guest'ten çık
+        showStatus("Cüzdan bağlandı ve kontrat hazır!", "success");
+    } catch (error) {
+        console.error(error);
+        showStatus("Bağlantı hatası: " + error.message, "error");
+    }
+}
+
+// -------------------- GUEST MODE (READ ONLY) --------------------
+async function enableGuestMode() {
+    try {
+        isGuestMode = true;
+        adminUnlocked = false;
+
+        provider = new ethers.providers.JsonRpcProvider(sepoliaRpcUrl);
+        contract = new ethers.Contract(contractAddress, contractABI, provider);
+
+        document.getElementById("walletAddress").innerText = "👤 Guest Mode (Read-Only) - MetaMask not required";
+        document.getElementById("walletAddress").style.color = "#004085";
+
+        showStatus("Guest mode enabled. You can view batch history without wallet.", "info");
+
+        document.getElementById("roleSelect").value = "customerPanel";
+        switchPanel();
+    } catch (err) {
+        console.error(err);
+        showStatus("Guest mode error: " + (err.message || err), "error");
+    }
+}
+
+// -------------------- ADMIN LOGIN (UI GATE) --------------------
+function adminLogin() {
+    const pass = document.getElementById("adminPassword").value;
+    const FIXED_PASSWORD = "bc123"; // input ile aynı
+
+    if (pass === FIXED_PASSWORD) {
+        adminUnlocked = true;
+        document.getElementById("adminLoginBox").style.display = "none";
+        showStatus("Admin unlocked. (MetaMask required for transactions)", "success");
+    } else {
+        adminUnlocked = false;
+        showStatus("Wrong admin password.", "error");
+    }
+}
+
+// -------------------- PANEL SWITCH --------------------
+function switchPanel() {
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    const selected = document.getElementById("roleSelect").value;
+    if (selected === "none") return;
+
+    // Admin panel: password gate
+    if (selected === "adminPanel") {
+        document.getElementById("adminPanel").classList.add('active');
+        document.getElementById("adminLoginBox").style.display = adminUnlocked ? "none" : "block";
+        return;
     }
 
-    function showStatus(msg, type) {
-        const el = document.getElementById("statusMessage");
-        el.innerText = msg;
-        el.className = type;
-        el.style.display = 'block';
-        setTimeout(() => { el.style.display = 'none'; }, 5000);
+    document.getElementById(selected).classList.add('active');
+}
+
+// -------------------- STATUS --------------------
+function showStatus(msg, type) {
+    const el = document.getElementById("statusMessage");
+    el.innerText = msg;
+    el.className = type;
+    el.style.display = 'block';
+    setTimeout(() => { el.style.display = 'none'; }, 5000);
+}
+
+// -------------------- HELPERS --------------------
+function requireWriteAccess() {
+    if (isGuestMode) {
+        alert("Guest mode is read-only. Please connect MetaMask for write actions.");
+        return false;
     }
-
-    async function registerActor(methodName) {
-        if(!contract) return alert("Önce cüzdanı bağla!");
-        const address = document.getElementById("actorAddress").value;
-        try {
-            showStatus("İşlem onaylanıyor...", "info");
-            const tx = await contract[methodName](address);
-            showStatus("Madencilik bekleniyor...", "info");
-            await tx.wait();
-            showStatus("Succesful.", "success");
-        } catch (err) {
-            showStatus("Error: " + (err.reason || err.message), "error");
-        }
+    if (!contract) {
+        alert("Önce cüzdanı bağla!");
+        return false;
     }
+    return true;
+}
 
-    async function createBatch() {
-        if(!contract) return alert("Önce cüzdanı bağla!");
-        const id = document.getElementById("batchIdCreate").value;
-        const name = document.getElementById("productName").value;
-        const qty = document.getElementById("quantity").value;
-        try {
-            showStatus("Ürün oluşturuluyor...", "info");
-            const tx = await contract.createBatch(id, name, qty);
-            await tx.wait();
-            showStatus("Succesful! Batch #" + id + " created.", "success");
-        } catch (err) {
-            showStatus("Hata: " + (err.reason || err.message), "error");
-        }
+// -------------------- ADMIN ACTIONS --------------------
+async function registerActor(methodName) {
+    if (!adminUnlocked) return alert("Admin panel locked. Please login with the fixed admin password.");
+    if (!requireWriteAccess()) return;
+
+    const address = document.getElementById("actorAddress").value;
+
+    try {
+        showStatus("İşlem onaylanıyor...", "info");
+        const tx = await contract[methodName](address);
+        showStatus("Madencilik bekleniyor...", "info");
+        await tx.wait();
+        showStatus("Successful.", "success");
+    } catch (err) {
+        showStatus("Error: " + (err.reason || err.message), "error");
     }
+}
 
-    async function addSensorData() {
-        if(!contract) return alert("Önce cüzdanı bağla!");
-        const id = document.getElementById("sensorBatchId").value;
-        const temp = document.getElementById("sensorTemp").value;
-        const hum = document.getElementById("sensorHumidity").value;
-        const loc = document.getElementById("sensorLocation").value;
-        try {
-            showStatus("Veri kaydediliyor...", "info");
-            const tx = await contract.addSensorData(id, temp, hum, loc);
-            await tx.wait();
-            showStatus("Succesful! Sensor data added.", "success");
-        } catch (err) {
-            showStatus("Hata: " + (err.reason || err.message), "error");
-        }
+// -------------------- PRODUCER --------------------
+async function createBatch() {
+    if (!requireWriteAccess()) return;
+
+    const id = document.getElementById("batchIdCreate").value;
+    const name = document.getElementById("productName").value;
+    const qty = document.getElementById("quantity").value;
+
+    try {
+        showStatus("Ürün oluşturuluyor...", "info");
+        const tx = await contract.createBatch(id, name, qty);
+        await tx.wait();
+        showStatus("Successful! Batch #" + id + " created.", "success");
+    } catch (err) {
+        showStatus("Hata: " + (err.reason || err.message), "error");
     }
+}
 
-    async function transferOwnership() {
-        const id = document.getElementById("transferBatchId").value;
-        const newOwner = document.getElementById("transferNewOwner").value;
-        try {
-            showStatus("Transfer başlatıldı...", "info");
-            const tx = await contract.transferOwnership(id, newOwner);
-            await tx.wait();
-            showStatus("Succesful! Transferred.", "success");
-        } catch (err) {
-            showStatus("Hata: " + (err.reason || err.message), "error");
-        }
+async function transferOwnership() {
+    if (!requireWriteAccess()) return;
+
+    const id = document.getElementById("transferBatchId").value;
+    const newOwner = document.getElementById("transferNewOwner").value;
+
+    try {
+        showStatus("Transfer başlatıldı...", "info");
+        const tx = await contract.transferOwnership(id, newOwner);
+        await tx.wait();
+        showStatus("Successful! Transferred.", "success");
+    } catch (err) {
+        showStatus("Hata: " + (err.reason || err.message), "error");
     }
+}
 
-    async function markAsArrived() {
-        const id = document.getElementById("retailerBatchId").value;
-        const result = document.getElementById("inspectionResult").value === "true";
-        try {
-            showStatus("Onay gönderiliyor...", "info");
-            const tx = await contract.markAsArrived(id, result);
-            await tx.wait();
-            showStatus("Succesful! Product on the market now.", "success");
-        } catch (err) {
-            showStatus("Hata: " + (err.reason || err.message), "error");
-        }
+// -------------------- TRANSPORTER --------------------
+async function addSensorData() {
+    if (!requireWriteAccess()) return;
+
+    const id = document.getElementById("sensorBatchId").value;
+    const temp = document.getElementById("sensorTemp").value;
+    const hum = document.getElementById("sensorHumidity").value;
+    const loc = document.getElementById("sensorLocation").value;
+
+    try {
+        showStatus("Veri kaydediliyor...", "info");
+        const tx = await contract.addSensorData(id, temp, hum, loc);
+        await tx.wait();
+        showStatus("Successful! Sensor data added.", "success");
+    } catch (err) {
+        showStatus("Hata: " + (err.reason || err.message), "error");
     }
+}
 
-    async function getBatchHistory() {
-        if(!contract) return alert("Önce cüzdanı bağla!");
-        const id = document.getElementById("queryBatchId").value;
-        const resultBox = document.getElementById("productResult");
-        const qrContainer = document.getElementById("qrcode");
+async function transferOwnershipFromTransporter() {
+  if (!requireWriteAccess()) return;
 
-        // Önceki QR kodu ve sonuçları temizle
-        qrContainer.innerHTML = "";
+  const id = document.getElementById("transporterTransferBatchId").value;
+  const newOwner = document.getElementById("transporterTransferNewOwner").value;
+
+  try {
+    showStatus("Transporter transfer başlatıldı...", "info");
+    const tx = await contract.transferOwnership(id, newOwner);
+    await tx.wait();
+    showStatus("Successful! Batch transferred to Distributor.", "success");
+  } catch (err) {
+    showStatus("Hata: " + (err.reason || err.message), "error");
+  }
+}
+
+
+// -------------------- DISTRIBUTOR --------------------
+async function transferOwnershipFromDistributor() {
+  if (!requireWriteAccess()) return;
+
+  const id = document.getElementById("distributorTransferBatchId").value;
+  const newOwner = document.getElementById("distributorTransferNewOwner").value;
+
+  try {
+    showStatus("Distributor transfer başlatıldı...", "info");
+    const tx = await contract.transferOwnership(id, newOwner);
+    await tx.wait();
+    showStatus("Successful! Batch transferred to Retailer.", "success");
+  } catch (err) {
+    showStatus("Hata: " + (err.reason || err.message), "error");
+  }
+}
+
+
+// -------------------- RETAILER --------------------
+async function markAsArrived() {
+    if (!requireWriteAccess()) return;
+
+    const id = document.getElementById("retailerBatchId").value;
+    const result = document.getElementById("inspectionResult").value === "true";
+
+    try {
+        showStatus("Onay gönderiliyor...", "info");
+        const tx = await contract.markAsArrived(id, result);
+        await tx.wait();
+        showStatus("Successful! Product on the market now.", "success");
+    } catch (err) {
+        showStatus("Hata: " + (err.reason || err.message), "error");
+    }
+}
+
+// -------------------- CUSTOMER (READ ONLY OK) --------------------
+async function getBatchHistory() {
+    if (!contract) return alert("Please connect MetaMask OR enable Guest Mode.");
+
+    const id = document.getElementById("queryBatchId").value;
+    const resultBox = document.getElementById("productResult");
+    const qrContainer = document.getElementById("qrcode");
+
+    qrContainer.innerHTML = "";
+    resultBox.style.display = 'none';
+
+    try {
+        showStatus("Loading the Data...", "info");
+        const data = await contract.getBatchHistory(id);
+
+        let html = `📦 <b>Product Details (Batch #${id})</b>\n`;
+        html += `----------------------------------\n`;
+        html += `🏷️ Product Name: ${data[0]}\n`;
+        html += `⚖️ Amount: ${data[1]}\n`;
+        html += `👨‍🌾 Producer: ${data[2]}\n`;
+        html += `👤 Current Holder: ${data[3]}\n`;
+        html += `🏁 Market Arrival: ${data[4] ? "ARRIVED" : "ON THE WAY"}\n`;
+        html += `📋 Quality Control: ${data[5] ? "✅ PASSED" : "❌ FAILED/PENDING"}\n`;
+
+        html += `\n🌡️ <b>SENSOR DETAILS</b>\n`;
+        if (data[6].length === 0) html += "No records yet.\n";
+        data[6].forEach((log, index) => {
+            const date = new Date(log.timestamp * 1000).toLocaleString();
+            html += `${index + 1}. [${date}] ${log.location} -> ${log.temperature}°C, %${log.humidity} Humidity\n`;
+        });
+
+        html += `\n🤝 <b>TRANSFER HISTORY</b>\n`;
+        data[7].forEach((owner, index) => {
+            html += `${index + 1}. ${owner}\n`;
+        });
+
+        resultBox.style.display = 'block';
+        resultBox.innerHTML = html;
+    
+		const baseUrl = window.location.origin + window.location.pathname;
+const qrData = `${baseUrl}?batchId=${id}`;
+
+new QRCode(qrContainer, { 
+    text: qrData, 
+    width: 128, 
+    height: 128, 
+    correctLevel: QRCode.CorrectLevel.H 
+});
+
+
+        showStatus("Successful", "success");
+    } catch (err) {
+        console.error(err);
         resultBox.style.display = 'none';
-
-        try {
-            showStatus("Loading the Data...", "info");
-            const data = await contract.getBatchHistory(id);
-
-            // 1. EKRANA YAZDIRMA
-            let html = `📦 <b>Product Details (Batch #${id})</b>\n`;
-            html += `----------------------------------\n`;
-            html += `🏷️ Product Name: ${data[0]}\n`;
-            html += `⚖️ Amount: ${data[1]}\n`;
-            html += `👨‍🌾 Producer: ${data[2]}\n`;
-            html += `👤 Current Holder: ${data[3]}\n`;
-            html += `🏁 Market Arrival: ${data[4] ? "ARRIVED" : "ON THE WAY"}\n`;
-            html += `📋 Quality Control: ${data[5] ? "✅ PASSED" : "❌ FAILED/PENDING"}\n`;
-            
-            html += `\n🌡️ <b>SENSOR DETAILS</b>\n`;
-            if(data[6].length === 0) html += "No records yet.\n";
-            data[6].forEach((log, index) => {
-                const date = new Date(log.timestamp * 1000).toLocaleString();
-                html += `${index+1}. [${date}] ${log.location} -> ${log.temperature}°C, %${log.humidity} Humidity\n`;
-            });
-
-            html += `\n🤝 <b>TRANSFER HISTORY</b>\n`;
-            data[7].forEach((owner, index) => {
-                html += `${index+1}. ${owner}\n`;
-            });
-
-            resultBox.style.display = 'block';
-            resultBox.innerHTML = html;
-
-            // 2. QR KOD OLUŞTURMA
-            // QR Koda ne koyacağız? Telefonla okutunca görülecek metin:
-            const qrData = `FreshChain Info\n\nBatch ID: ${id}\nProduct: ${data[0]}\nAmount: ${data[1]}\nStatus: ${data[4] ? 'Arrived' : 'In Transit'}`;
-            
-            new QRCode(qrContainer, {
-                text: qrData,
-                width: 128,
-                height: 128,
-                colorDark : "#000000",
-                colorLight : "#ffffff",
-                correctLevel : QRCode.CorrectLevel.H
-            });
-
-            showStatus("Succesful", "success");
-
-        } catch (err) {
-            console.error(err);
-            resultBox.style.display = 'none';
-            showStatus("Hata: Ürün bulunamadı veya bir sorun oluştu.", "error");
-        }
+        showStatus("Hata: Ürün bulunamadı veya bir sorun oluştu.", "error");
     }
+}
+
+document.addEventListener("DOMContentLoaded", async () => {
+    const redirected = await handleQrScanRedirect();
+
+    if (!redirected) {
+        // QR ile gelmemişse normal çalışma
+        document.getElementById("walletAddress").innerText =
+            "Wallet not Connected.";
+    }
+});
+
+
 </script>
 
 </body>
